@@ -73,6 +73,72 @@ class TrainingBox(object):
         :param model_config: model configuration.
         :type model_config: dict
         """
+        # Recover model_config from train_config / top-level models if caller passed None
+        if model_config is None:
+            tc = getattr(self, "train_config", None)
+            found = None
+            if isinstance(tc, dict):
+                found = tc.get("model_config") or tc.get("model")
+                if found is None:
+                    models = tc.get("models")
+                    if isinstance(models, dict) and models:
+                        found = models.get("student_model") or next(iter(models.values()))
+            # fallback to attribute cfg if present
+            if found is None and hasattr(self, "cfg") and isinstance(self.cfg, dict):
+                top = self.cfg
+                found = top.get("model_config") or top.get("model")
+                if found is None:
+                    models = top.get("models")
+                    if isinstance(models, dict) and models:
+                        found = models.get("student_model") or next(iter(models.values()))
+            model_config = found
+
+        if model_config is None:
+            raise RuntimeError(
+                "No model_config found. Provide 'model_config' inside your train config or top-level cfg."
+            )
+
+        # Ensure forward_proc exists (defensive default)
+        if isinstance(model_config, dict) and "forward_proc" not in model_config:
+            model_config["forward_proc"] = "default_pre_forward_process"
+
+        # Resolve forward process: support callable, registry key, or fallback to default
+        fp_val = model_config.get('forward_proc', None) if isinstance(model_config, dict) else None
+        try:
+            if callable(fp_val):
+                self.model_forward_proc = fp_val
+            else:
+                self.model_forward_proc = get_forward_proc_func(fp_val)
+        except Exception:
+            logger.warning("Forward proc `%s` not found in registry; using default_pre_forward_process", fp_val)
+            self.model_forward_proc = default_pre_forward_process
+
+        # --- NEW: build model from model_config if not already present ---
+        if getattr(self, "model", None) is None:
+            mc = None
+            # common places for model config in this repo
+            if isinstance(self.train_config, dict):
+                mc = self.train_config.get("model") or self.train_config.get("model_config")
+                if mc is None:
+                    models = self.train_config.get("models")
+                    if isinstance(models, dict) and models:
+                        mc = models.get("student_model") or next(iter(models.values()))
+            # final attempt: sometimes full cfg is passed as train_config, check nested places
+            if mc is None and isinstance(self.train_config, dict):
+                # try top-level-like structures
+                mc = self.train_config.get("models") or self.train_config.get("model_config") or self.train_config.get("model")
+                if isinstance(mc, dict) and "student_model" in mc:
+                    mc = mc.get("student_model")
+
+            if isinstance(mc, dict):
+                model_label = mc.get("key") or mc.get("label") or mc.get("model_label")
+                try:
+                    # redesign_model signature in this repo: (org_model, model_config, model_label, ...)
+                    self.model = redesign_model(None, mc, model_label)
+                    logger.info("Built model from model_config for TrainingBox: %s", type(self.model).__name__)
+                except Exception as e:
+                    logger.warning("Failed to build model from model_config: %s. TrainingBox will continue and may build later.", e)
+
         unwrapped_org_model = \
             self.org_model.module if check_if_wrapped(self.org_model) else self.org_model
         self.target_model_pairs.clear()
@@ -95,7 +161,17 @@ class TrainingBox(object):
         self.model_any_frozen = \
             len(model_config.get('frozen_modules', list())) > 0 or not model_config.get('requires_grad', True)
         self.target_model_pairs.extend(set_hooks(self.model, ref_model, model_config, self.model_io_dict))
-        self.model_forward_proc = get_forward_proc_func(model_config.get('forward_proc', None))
+        # Resolve forward process: support callable, registry key, or fallback to default
+        fp_val = model_config.get('forward_proc', None)
+        try:
+            if callable(fp_val):
+                self.model_forward_proc = fp_val
+            else:
+                # try registry lookup (may raise)
+                self.model_forward_proc = get_forward_proc_func(fp_val)
+        except Exception:
+            logger.warning("Forward proc `%s` not found in registry; using default_pre_forward_process", fp_val)
+            self.model_forward_proc = default_pre_forward_process
 
     def setup_loss(self, train_config):
         """
@@ -147,6 +223,33 @@ class TrainingBox(object):
         :param train_config: training configuration.
         :type train_config: dict
         """
+        # keep a reference so other methods can look up model configs if needed
+        self.train_config = train_config or {}
+
+        # --- NEW: try to build model from train_config if caller didn't pass one ---
+        if getattr(self, "model", None) is None:
+            mc = None
+            if isinstance(self.train_config, dict):
+                mc = self.train_config.get("model") or self.train_config.get("model_config")
+                if mc is None:
+                    models = self.train_config.get("models")
+                    if isinstance(models, dict) and models:
+                        mc = models.get("student_model") or next(iter(models.values()))
+            # final fallback: accept nested 'models' shaped like top-level cfg
+            if mc is None and isinstance(self.train_config, dict):
+                maybe_models = self.train_config.get("models")
+                if isinstance(maybe_models, dict) and "student_model" in maybe_models:
+                    mc = maybe_models.get("student_model")
+            if isinstance(mc, dict):
+                model_label = mc.get("key") or mc.get("label") or mc.get("model_label")
+                try:
+                    # redesign_model signature in this repo: (org_model, model_config, model_label, ...)
+                    self.model = redesign_model(None, mc, model_label)
+                except Exception:
+                    # fail silently here; later code will either build or continue without model
+                    self.model = None
+        # --- END NEW ---
+
         # Set up train and val data loaders
         self.setup_data_loaders(train_config)
 
@@ -163,7 +266,9 @@ class TrainingBox(object):
             freeze_module_params(self.model)
 
         # Wrap models if necessary
-        any_updatable = len(get_updatable_param_names(self.model)) > 0
+        any_updatable = False
+        if getattr(self, "model", None) is not None:
+            any_updatable = len(get_updatable_param_names(self.model)) > 0
         self.model =\
             wrap_model(self.model, model_config, self.device, self.device_ids, self.distributed,
                        self.model_any_frozen, any_updatable)
@@ -392,17 +497,7 @@ def get_training_box(model, dataset_dict, train_config, device, device_ids, dist
 
     :param model: model.
     :type model: nn.Module
-    :param dataset_dict: dict that contains datasets with IDs of your choice.
-    :type dataset_dict: dict
-    :param train_config: training configuration.
-    :type train_config: dict
-    :param device: target device.
-    :type device: torch.device
-    :param device_ids: target device IDs.
-    :type device_ids: list[int]
-    :param distributed: whether to be in distributed training mode.
-    :type distributed: bool
-    :param lr_factor: multiplier for learning rate.
+    :param dataset_dict: dict that contains datasets
     :type lr_factor: float or int
     :param accelerator: Hugging Face accelerator.
     :type accelerator: accelerate.Accelerator or None
