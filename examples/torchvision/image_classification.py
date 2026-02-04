@@ -2,6 +2,15 @@ import argparse
 import datetime
 import os
 import time
+# ... existing imports ...
+from torchdistill.core.training import get_training_box
+from torchdistill.datasets.util import build_data_loader
+# --- ADD THESE IMPORTS ---
+from torchvision.datasets import CIFAR10
+from torchvision.transforms import Compose, ToTensor, Normalize, RandomCrop, RandomHorizontalFlip
+# -------------------------
+from torchdistill.misc.log import set_basic_log_config, setup_log_file, SmoothedValue, MetricLogger
+# ... rest of the file ...
 
 import torch
 from torch import distributed as dist
@@ -172,7 +181,35 @@ def main(args):
     config = yaml_util.load_yaml_file(os.path.expanduser(args.config))
     import_dependencies(config.get('dependencies', None))
     device = torch.device(args.device)
-    dataset_dict = config['datasets']
+    #dataset_dict = config['datasets']
+    DATA_ROOT = 'D:/torchdistill/torchdistill/resource/dataset/cifar10'
+    mean = [0.49139968, 0.48215841, 0.44653091]
+    std = [0.24703223, 0.24348513, 0.26158784]
+    train_transform = Compose([
+        RandomCrop(32, padding=4),
+        RandomHorizontalFlip(p=0.5),
+        ToTensor(),
+        Normalize(mean, std)
+    ])
+    
+    val_test_transform = Compose([
+        ToTensor(),
+        Normalize(mean, std)
+    ])
+    
+    # 3. Manually load datasets (download=False is critical)
+    train_dataset = CIFAR10(root=DATA_ROOT, train=True, download=False, transform=train_transform)
+    # Both val and test splits should use the CIFAR-10 test set (train=False)
+    val_dataset = CIFAR10(root=DATA_ROOT, train=False, download=False, transform=val_test_transform)
+    test_dataset = CIFAR10(root=DATA_ROOT, train=False, download=False, transform=val_test_transform)
+
+    # 4. Create the dataset_dict expected by the rest of the torchdistill code
+    dataset_dict = {
+        'cifar10/train': train_dataset,
+        'cifar10/val': val_dataset,
+        'cifar10/test': test_dataset,
+    }
+    # --- END MANUAL DATASET INITIALIZATION BLOCK ---
     models_config = config['models']
     teacher_model_config = models_config.get('teacher_model', None)
     teacher_model =\
