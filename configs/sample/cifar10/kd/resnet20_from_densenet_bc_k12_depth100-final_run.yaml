@@ -2,14 +2,14 @@ datasets:
   cifar10:
     name: &dataset_name 'cifar10'
     key: 'CIFAR10'
-    root: &root_dir !join ['./resource/dataset/', *dataset_name]
+    root: &root_dir 'D:/torchdistill/torchdistill/resource/dataset/cifar10' #!join ['./resource/dataset/', *dataset_name]
     splits:
       train:
         dataset_id: &cifar10_train !join [*dataset_name, '/train']
         kwargs:
           root: *root_dir
           train: True
-          download: True
+          download: False
           transform_configs:
             - key: 'RandomCrop'
               kwargs:
@@ -30,7 +30,7 @@ datasets:
         kwargs:
           root: *root_dir
           train: False
-          download: True
+          download: False
           transform_configs: &val_transform
             - key: 'ToTensor'
               kwargs:
@@ -40,7 +40,7 @@ datasets:
         kwargs:
           root: *root_dir
           train: False
-          download: True
+          download: False
           transform_configs: *val_transform
 
 models:
@@ -71,19 +71,19 @@ train:
       kwargs:
     kwargs:
       batch_size: 64
-      num_workers: 16
+      num_workers: 0
       pin_memory: True
       drop_last: False
     cache_output:
   val_data_loader:
-    dataset_id: *cifar10_test
+    dataset_id: *cifar10_val
     sampler: &val_sampler
       class_or_func: !import_get
         key: 'torch.utils.data.SequentialSampler'
       kwargs:
     kwargs:
       batch_size: 128
-      num_workers: 16
+      num_workers: 0
       pin_memory: True
       drop_last: False
   teacher:
@@ -133,6 +133,6 @@ test:
     sampler: *val_sampler
     kwargs:
       batch_size: 1
-      num_workers: 16
+      num_workers: 0
       pin_memory: True
       drop_last: False
