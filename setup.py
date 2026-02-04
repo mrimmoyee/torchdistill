@@ -16,7 +16,7 @@ setup(
     long_description_content_type='text/markdown',
     url='https://github.com/yoshitomo-matsubara/torchdistill',
     packages=find_packages(exclude=('tests', 'examples', 'demo', 'docs', 'configs')),
-    python_requires='>=3.9',
+    python_requires='>=3.10',
     install_requires=[
         'torch>=2.5.1',
         'torchvision>=0.20.1',
